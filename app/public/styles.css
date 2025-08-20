@@ -1,0 +1,70 @@
+:root {
+    --bg-primary: #121212; --bg-secondary: #181818; --bg-glass: rgba(30, 30, 30, 0.7);
+    --text-primary: #ffffff; --text-secondary: #b3b3b3; --accent-primary: #1DB954; --accent-danger: #F44336;
+    --border-color: rgba(255, 255, 255, 0.1); --shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+    --text-accent-calories: #FFD54F; --text-accent-protein: #EF9A9A; --text-accent-carbs: #90CAF9; --text-accent-fat: #CE93D8;
+}
+html { scroll-behavior: smooth; }
+body { margin: 0; font-family: 'Inter', sans-serif; background-color: var(--bg-primary); color: var(--text-primary); padding-bottom: 120px; }
+#app-header { background-color: var(--bg-secondary); padding: 1rem; border-bottom: 1px solid var(--border-color); position: sticky; top: 0; z-index: 100; }
+.header-content { display: flex; justify-content: space-between; align-items: center; max-width: 1400px; margin: 0 auto; padding: 0 1.5rem; }
+#app-main { flex: 1; padding: 1.5rem; width: 100%; max-width: 1400px; margin: 0 auto; box-sizing: border-box; }
+#app-nav { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); display: flex; align-items: center; justify-content: space-around; width: 90%; max-width: 1000px; height: 75px; background: var(--bg-glass); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px); border-radius: 40px; border: 1px solid var(--border-color); box-shadow: var(--shadow); z-index: 1000; padding: 0 1.5rem; gap: 1rem; }
+.nav-btn { background: none; border: none; cursor: pointer; color: var(--text-secondary); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; font-size: 0.8rem; font-weight: 500; flex: 1; height: 100%; transition: color 0.2s ease; }
+.nav-btn svg { width: 26px; height: 26px; stroke: var(--text-secondary); transition: stroke 0.2s ease; }
+.nav-btn.active span, .nav-btn.active svg { color: var(--accent-primary); stroke: var(--accent-primary); }
+#central-add-btn { position: absolute; left: 50%; top: -75%; transform: translateX(-50%); width: 64px; height: 64px; border-radius: 50%; background: var(--accent-primary); border: none; color: white; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 5px 15px rgba(29, 185, 84, 0.4); transition: transform 0.2s ease; z-index: 1; border: 6px solid var(--bg-secondary); }
+.card { background: var(--bg-glass); border: 1px solid var(--border-color); backdrop-filter: blur(10px); border-radius: 12px; box-shadow: var(--shadow); position: relative; overflow: hidden; display: flex; flex-direction: column; }
+.grid-container { display: grid; gap: 1.5rem; }
+
+/* --- REFINED CARD ACTION BUTTONS --- */
+.card-actions { position: absolute; top: .75rem; right: .75rem; display: flex; gap: 0.5rem; z-index: 5; }
+.card-action-btn { background: none; border: none; color: rgba(255,255,255,0.7); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s ease; padding: 0.5rem; }
+.card-action-btn svg { width: 20px; height: 20px; stroke: currentColor; stroke-width: 2.5; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.5)); }
+.card-action-btn.edit-btn:hover { color: var(--accent-primary); transform: scale(1.1); }
+.card-action-btn.delete-btn:hover { color: var(--accent-danger); transform: scale(1.1); }
+
+.card img { width: 100%; object-fit: cover; border-radius: 8px 8px 0 0; background-color: #333; }
+.card-content { padding: 1.5rem; background: linear-gradient(to bottom, var(--card-bg, var(--bg-glass)), var(--bg-glass)); flex: 1; display: flex; flex-direction: column; }
+.card-content h3 { margin: 0 0 0.5rem 0; font-size: 1.4rem; border-bottom: 1px solid var(--border-color); padding-bottom: 0.5rem; }
+.recipe-grid { grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+.ingredient-grid { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.recipe-card img { height: 220px; }
+.ingredient-card img { height: 350px; }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(70px, 1fr)); gap: 1rem; margin-top: auto; padding-top: 1rem; }
+.stat-item { text-align: left; }
+.stat-value { font-size: 1.2rem; font-weight: 700; line-height: 1.1; }
+.stat-value span { font-size: 0.9rem; font-weight: 500; color: var(--text-secondary); margin-left: 3px; }
+.stat-label { font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase; display: flex; align-items: center; gap: 4px; margin-top: 2px; }
+.stat-label svg { width: 12px; height: 12px; stroke-width: 2.5; }
+.stat-item.calories .stat-value, .stat-item.calories .stat-label svg { color: var(--text-accent-calories); stroke: var(--text-accent-calories); }
+.stat-item.protein .stat-value, .stat-item.protein .stat-label svg { color: var(--text-accent-protein); stroke: var(--text-accent-protein); }
+.stat-item.carbs .stat-value, .stat-item.carbs .stat-label svg { color: var(--text-accent-carbs); stroke: var(--text-accent-carbs); }
+.stat-item.fat .stat-value, .stat-item.fat .stat-label svg { color: var(--text-accent-fat); stroke: var(--text-accent-fat); }
+.stat-item.cost .stat-value, .stat-item.cost .stat-label svg { color: var(--accent-primary); stroke: var(--accent-primary); }
+.planner-date-header { margin-bottom: 1.5rem; background-color: var(--bg-secondary); padding: 1rem; border-radius: 12px; }
+.date-scroller-container { overflow-x: auto; white-space: nowrap; padding-bottom: 10px; margin-bottom: 10px; -ms-overflow-style: none; scrollbar-width: none; }
+.date-scroller { display: flex; gap: 1rem; }
+.date-item { cursor: pointer; text-align: center; padding: 0.5rem; border-radius: 8px; min-width: 50px; }
+.date-item.active .date-number { background-color: var(--accent-primary); color: var(--bg-secondary); border-radius: 50%; width: 32px; height: 32px; line-height: 32px; margin: 0.25rem auto 0; }
+#daily-totals { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 2rem; }
+.total-card { flex: 1; background: var(--bg-secondary); padding: 1rem; border-radius: 8px; text-align: center; min-width: 120px; }
+.meal-section { background-color: var(--bg-secondary); padding: 1.5rem; border-radius: 12px; }
+.meal-item { display: flex; align-items: center; gap: 1rem; background: rgba(255,255,255,0.05); padding: 0.75rem; border-radius: 8px; }
+.meal-item img { width: 60px; height: 60px; object-fit: cover; border-radius: 6px; }
+
+/* --- FIXED MODAL STYLES --- */
+#modal-container { position: fixed; inset: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); display: flex; align-items: center; justify-content: center; z-index: 1001; }
+#modal-container.hidden { display: none; }
+#modal-content { background: var(--bg-secondary); padding: 2.5rem; border-radius: 16px; width: 90%; max-width: 800px; position: relative; border: 1px solid var(--border-color); max-height: 90vh; display: flex; flex-direction: column; box-shadow: var(--shadow); }
+#modal-body { overflow-y: auto; }
+#modal-close-btn { position: absolute; top: 1rem; right: 1rem; background: none; border: none; font-size: 1.5rem; cursor: pointer; color: var(--text-secondary); }
+.input-group { margin-bottom: 1.25rem; }
+.input-group label { display: block; margin-bottom: 0.5rem; font-weight: 500; color: var(--text-secondary); font-size: 0.9rem; }
+.input-group input, .input-group textarea, .input-group select { width: 100%; padding: 0.8rem 1rem; border: 1px solid var(--border-color); border-radius: 8px; box-sizing: border-box; background-color: var(--bg-glass); color: var(--text-primary); font-size: 1rem; backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); }
+.input-group input[type="file"] { padding: 0.5rem; }
+.button { background-color: var(--accent-primary); color: var(--text-primary) !important; border: none; padding: 0.8rem 1.75rem; border-radius: 25px; font-weight: 700; cursor: pointer; transition: transform 0.2s; text-decoration: none; display: inline-block; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem 2rem; }
+#recipe-ingredients-list-modal { margin-top: 1rem; display: flex; flex-direction: column; gap: 0.5rem; }
+#recipe-ingredients-list-modal > div { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0.75rem; background-color: rgba(0,0,0,0.2); border-radius: 6px; }
+.remove-ing-btn { background: none; border: none; color: #ff4d4d; cursor: pointer; font-size: 1.2rem; }

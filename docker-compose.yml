@@ -1,0 +1,11 @@
+version: '3.8'
+services:
+  meal-app:
+    build: ./app
+    container_name: my-meal-app-v4.5.0
+    ports:
+      - "5029:3000"
+    volumes:
+      - ./app/data:/app/data
+      - ./app/public/uploads:/app/public/uploads
+    restart: unless-stopped
