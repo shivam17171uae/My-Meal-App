@@ -1,0 +1,277 @@
+# --- 1. DEFINE FINAL PROJECT VERSION AND DIRECTORY ---
+PROJECT_VERSION="v4.5.0"
+PROJECT_DIR="/srv/docker/my-meal-app-${PROJECT_VERSION}"
+OLD_PROJECT_DIR="/srv/docker/my-meal-app-v4.4.0" # Last known good directory to migrate from
+HOST_PORT="5029" # The port for the final version
+echo "--- Finalizing Stable Project: ${PROJECT_VERSION} ---"
+
+# --- 2. ENSURE THE FINAL PROJECT IS SET UP CORRECTLY ---
+# This part is mostly for safety, ensuring the last script ran correctly.
+# It will re-run the setup, which is safe to do.
+
+# Clean up Docker environment
+echo "--- Cleaning up Docker environment... ---"
+docker stop "my-meal-app-${PROJECT_VERSION}" > /dev/null 2>&1
+docker rm "my-meal-app-${PROJECT_VERSION}" > /dev/null 2>&1
+docker network prune -f > /dev/null 2>&1
+
+# Create directories
+mkdir -p "$PROJECT_DIR/app/public/uploads/ingredients" "$PROJECT_DIR/app/public/uploads/recipes" "$PROJECT_DIR/app/data"
+
+# Migrate data if it hasn't been already
+if [ -d "$OLD_PROJECT_DIR/app/data" ] && [ ! -f "$PROJECT_DIR/app/data/database.sqlite" ]; then
+    echo "--- Migrating data from ${OLD_PROJECT_DIR}... ---"
+    cp -r "$OLD_PROJECT_DIR/app/data/." "$PROJECT_DIR/app/data/" && echo "--- Database copied. ---"
+    cp -r "$OLD_PROJECT_DIR/app/public/uploads/." "$PROJECT_DIR/app/public/uploads/" && echo "--- Images copied. ---"
+else
+    echo "--- Data appears to be already migrated or no old data found. Skipping migration. ---"
+fi
+
+# Create all necessary files (docker-compose.yml, Dockerfile, package.json, server.js, index.html, styles.css, app.js)
+# This will overwrite existing files to ensure they are the correct stable version.
+echo "--- Creating/Verifying all project files for v4.5.0... ---"
+
+# --- docker-compose.yml ---
+cat <<EOF > "$PROJECT_DIR/docker-compose.yml"
+version: '3.8'
+services:
+  meal-app:
+    build: ./app
+    container_name: my-meal-app-stable
+    ports:
+      - "${HOST_PORT}:3000"
+    volumes:
+      - ./app/data:/app/data
+      - ./app/public/uploads:/app/public/uploads
+    restart: unless-stopped
+EOF
+
+# --- Dockerfile ---
+cat <<'EOF' > "$PROJECT_DIR/app/Dockerfile"
+FROM node:18-alpine
+RUN apk add --no-cache sqlite-dev build-base
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+EXPOSE 3000
+CMD [ "npm", "start" ]
+EOF
+
+# --- package.json ---
+cat <<'EOF' > "$PROJECT_DIR/app/package.json"
+{
+  "name": "my-meal-app",
+  "version": "4.5.0",
+  "description": "A self-hosted meal planner with a refined UI.",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "express": "^4.18.2", "multer": "^1.4.5-lts.1", "sqlite": "^4.2.1", "sqlite3": "^5.1.6" }
+}
+EOF
+
+# --- server.js ---
+cat <<'EOF' > "$PROJECT_DIR/app/server.js"
+const express = require('express');
+const path = require('path');
+const multer = require('multer');
+const { open } = require('sqlite');
+const sqlite3 = require('sqlite3');
+const fs = require('fs');
+const app = express();
+const PORT = 3000;
+const DB_PATH = path.join(__dirname, 'data', 'database.sqlite');
+const UPLOADS_PATH = path.join(__dirname, 'public');
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+let db;
+(async () => {
+    db = await open({ filename: DB_PATH, driver: sqlite3.Database });
+    console.log('Connected to the SQLite database.');
+    await db.exec('PRAGMA foreign_keys = ON;');
+    await db.exec(`
+        CREATE TABLE IF NOT EXISTS ingredients (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, category TEXT, calories REAL, protein REAL, carbs REAL, fat REAL, fiber REAL, price REAL, per_unit INTEGER DEFAULT 100, image_url TEXT);
+        CREATE TABLE IF NOT EXISTS recipes (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, instructions TEXT, image_url TEXT);
+        CREATE TABLE IF NOT EXISTS recipe_ingredients (recipe_id INTEGER, ingredient_id INTEGER, quantity_grams REAL NOT NULL, FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE, FOREIGN KEY (ingredient_id) REFERENCES ingredients(id) ON DELETE CASCADE, PRIMARY KEY (recipe_id, ingredient_id));
+        CREATE TABLE IF NOT EXISTS meal_planner (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, meal_type TEXT NOT NULL, recipe_id INTEGER, ingredient_id INTEGER, quantity_grams REAL, FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE, FOREIGN KEY (ingredient_id) REFERENCES ingredients(id) ON DELETE CASCADE);
+    `);
+})();
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const dest = req.path.includes('recipe') ? './public/uploads/recipes/' : './public/uploads/ingredients/';
+        cb(null, dest);
+    },
+    filename: (req, file, cb) => {
+        const prefix = req.path.includes('recipe') ? 'recipe-' : 'ingredient-';
+        cb(null, prefix + Date.now() + path.extname(file.originalname));
+    }
+});
+const upload = multer({ storage: storage }).single('image');
+const deleteImage = async (id, table) => {
+    try {
+        const item = await db.get(`SELECT image_url FROM ${table} WHERE id = ?`, [id]);
+        if (item && item.image_url && !item.image_url.includes('default-recipe.png')) {
+            const imagePath = path.join(UPLOADS_PATH, item.image_url);
+            if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
+        }
+    } catch (e) { console.error("Error deleting image:", e); }
+};
+app.get('/api/ingredients', async (req, res) => res.json(await db.all('SELECT * FROM ingredients ORDER BY name')));
+app.post('/api/ingredients', upload, async (req, res) => { const { name, category, calories, protein, carbs, fat, price } = req.body; const imageUrl = req.file ? `/uploads/ingredients/${req.file.filename}` : null; try { const result = await db.run('INSERT INTO ingredients (name, category, calories, protein, carbs, fat, price, image_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [name, category, calories, protein, carbs, fat, price, imageUrl]); res.status(201).json({ id: result.lastID, ...req.body, image_url: imageUrl }); } catch (dbErr) { res.status(400).json({ error: 'Ingredient with this name already exists.' }); } });
+app.put('/api/ingredients/:id', upload, async (req, res) => { const { id } = req.params; const { name, category, calories, protein, carbs, fat, price } = req.body; const existing = await db.get('SELECT image_url FROM ingredients WHERE id = ?', [id]); if (req.file && existing.image_url) await deleteImage(id, 'ingredients'); const imageUrl = req.file ? `/uploads/ingredients/${req.file.filename}` : existing.image_url; try { await db.run('UPDATE ingredients SET name=?, category=?, calories=?, protein=?, carbs=?, fat=?, price=?, image_url=? WHERE id=?', [name, category, calories, protein, carbs, fat, price, imageUrl, id]); res.status(200).json({ message: 'Ingredient updated' }); } catch (dbErr) { res.status(400).json({ error: 'Update failed. Ingredient name might already exist.' }); } });
+app.delete('/api/ingredients/:id', async (req, res) => { await deleteImage(req.params.id, 'ingredients'); await db.run('DELETE FROM ingredients WHERE id = ?', [req.params.id]); res.status(200).json({ message: 'Ingredient deleted' }); });
+app.get('/api/recipes', async (req, res) => { const recipes = await db.all(`SELECT r.id, r.name, r.instructions, r.image_url, (SELECT json_group_array(json_object('id', i.id, 'name', i.name, 'quantity', ri.quantity_grams)) FROM recipe_ingredients ri JOIN ingredients i ON ri.ingredient_id = i.id WHERE ri.recipe_id = r.id) as ingredients FROM recipes r ORDER BY r.name`); res.json(recipes.map(r => ({ ...r, ingredients: JSON.parse(r.ingredients) || [] }))); });
+app.post('/api/recipes', upload, async (req, res) => { const { name, instructions, ingredients } = JSON.parse(req.body.recipeData); const imageUrl = req.file ? `/uploads/recipes/${req.file.filename}` : '/default-recipe.png'; const recipeResult = await db.run('INSERT INTO recipes (name, instructions, image_url) VALUES (?, ?, ?)', [name, instructions, imageUrl]); const recipeId = recipeResult.lastID; if (ingredients && ingredients.length > 0) { const stmt = await db.prepare('INSERT INTO recipe_ingredients (recipe_id, ingredient_id, quantity_grams) VALUES (?, ?, ?)'); for (const ing of ingredients) await stmt.run(recipeId, ing.id, ing.quantity); await stmt.finalize(); } res.status(201).json({ message: 'Recipe created', recipeId }); });
+app.put('/api/recipes/:id', upload, async (req, res) => { const { id } = req.params; const { name, instructions, ingredients } = JSON.parse(req.body.recipeData); const existing = await db.get('SELECT image_url FROM recipes WHERE id = ?', [id]); if (req.file) await deleteImage(id, 'recipes'); const imageUrl = req.file ? `/uploads/recipes/${req.file.filename}` : existing.image_url; await db.run('UPDATE recipes SET name=?, instructions=?, image_url=? WHERE id=?', [name, instructions, imageUrl, id]); await db.run('DELETE FROM recipe_ingredients WHERE recipe_id = ?', [id]); if (ingredients && ingredients.length > 0) { const stmt = await db.prepare('INSERT INTO recipe_ingredients (recipe_id, ingredient_id, quantity_grams) VALUES (?, ?, ?)'); for (const ing of ingredients) await stmt.run(id, ing.id, ing.quantity); await stmt.finalize(); } res.status(200).json({ message: 'Recipe updated' }); });
+app.delete('/api/recipes/:id', async (req, res) => { await deleteImage(req.params.id, 'recipes'); await db.run('DELETE FROM recipes WHERE id = ?', [req.params.id]); res.status(200).json({ message: 'Recipe deleted' }); });
+app.post('/api/meal-planner', async (req, res) => { const { date, meal_type, item_type, item_id, quantity } = req.body; let result = (item_type === 'recipe') ? await db.run('INSERT INTO meal_planner (date, meal_type, recipe_id) VALUES (?, ?, ?)', [date, meal_type, item_id]) : await db.run('INSERT INTO meal_planner (date, meal_type, ingredient_id, quantity_grams) VALUES (?, ?, ?, ?)', [date, meal_type, item_id, quantity]); res.status(201).json({ id: result.lastID }); });
+app.delete('/api/meal-planner/:id', async (req, res) => { await db.run('DELETE FROM meal_planner WHERE id = ?', [req.params.id]); res.status(200).json({ message: 'Item removed' }); });
+app.get('/api/meal-planner/:date', async (req, res) => { const planItems = await db.all(`SELECT mp.id, mp.date, mp.meal_type, mp.recipe_id, mp.ingredient_id, mp.quantity_grams, r.name as recipe_name, r.image_url as recipe_image, i.name as ingredient_name, i.image_url as ingredient_image, i.calories, i.protein, i.carbs, i.fat, i.price FROM meal_planner mp LEFT JOIN recipes r ON mp.recipe_id = r.id LEFT JOIN ingredients i ON mp.ingredient_id = i.id WHERE mp.date = ?`, [req.params.date]); res.json(planItems); });
+app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+EOF
+
+# --- index.html ---
+cat <<'EOF' > "$PROJECT_DIR/app/public/index.html"
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>My Meal App</title><link rel="stylesheet" href="styles.css"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet"></head><body><div id="app"><header id="app-header"><div class="header-content"><h1 id="view-title"></h1></div></header><main id="app-main"></main><nav id="app-nav"><button data-view="recipes" class="nav-btn"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg><span>Recipes</span></button><button data-view="ingredients" class="nav-btn"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2z"></path><path d="M15.4 16c-2.2 0-4-1.8-4-4s1.8-4 4-4c1.1 0 2.1.4 2.8 1.2"></path></svg><span>Ingredients</span></button><button id="central-add-btn"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></button><button data-view="planner" class="nav-btn"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg><span>Planner</span></button></nav></div><div id="modal-container" class="hidden"><div id="modal-content"><button id="modal-close-btn">&times;</button><div id="modal-body"></div></div></div><script src="https://cdnjs.cloudflare.com/ajax/libs/color-thief/2.3.0/color-thief.umd.js"></script><script src="app.js"></script></body></html>
+EOF
+
+# --- styles.css ---
+cat <<'EOF' > "$PROJECT_DIR/app/public/styles.css"
+:root {
+    --bg-primary: #121212; --bg-secondary: #181818; --bg-glass: rgba(30, 30, 30, 0.7);
+    --text-primary: #ffffff; --text-secondary: #b3b3b3; --accent-primary: #1DB954; --accent-danger: #F44336;
+    --border-color: rgba(255, 255, 255, 0.1); --shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+    --text-accent-calories: #FFD54F; --text-accent-protein: #EF9A9A; --text-accent-carbs: #90CAF9; --text-accent-fat: #CE93D8;
+}
+html { scroll-behavior: smooth; }
+body { margin: 0; font-family: 'Inter', sans-serif; background-color: var(--bg-primary); color: var(--text-primary); padding-bottom: 120px; }
+#app-header { background-color: var(--bg-secondary); padding: 1rem; border-bottom: 1px solid var(--border-color); position: sticky; top: 0; z-index: 100; }
+.header-content { display: flex; justify-content: space-between; align-items: center; max-width: 1400px; margin: 0 auto; padding: 0 1.5rem; }
+#app-main { flex: 1; padding: 1.5rem; width: 100%; max-width: 1400px; margin: 0 auto; box-sizing: border-box; }
+#app-nav { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); display: flex; align-items: center; justify-content: space-around; width: 90%; max-width: 1000px; height: 75px; background: var(--bg-glass); backdrop-filter: blur(15px); -webkit-backdrop-filter: blur(15px); border-radius: 40px; border: 1px solid var(--border-color); box-shadow: var(--shadow); z-index: 1000; padding: 0 1.5rem; gap: 1rem; }
+.nav-btn { background: none; border: none; cursor: pointer; color: var(--text-secondary); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; font-size: 0.8rem; font-weight: 500; flex: 1; height: 100%; transition: color 0.2s ease; }
+.nav-btn svg { width: 26px; height: 26px; stroke: var(--text-secondary); transition: stroke 0.2s ease; }
+.nav-btn.active span, .nav-btn.active svg { color: var(--accent-primary); stroke: var(--accent-primary); }
+#central-add-btn { position: absolute; left: 50%; top: -75%; transform: translateX(-50%); width: 64px; height: 64px; border-radius: 50%; background: var(--accent-primary); border: none; color: white; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 5px 15px rgba(29, 185, 84, 0.4); transition: transform 0.2s ease; z-index: 1; border: 6px solid var(--bg-secondary); }
+.card { background: var(--bg-glass); border: 1px solid var(--border-color); backdrop-filter: blur(10px); border-radius: 12px; box-shadow: var(--shadow); position: relative; overflow: hidden; display: flex; flex-direction: column; }
+.grid-container { display: grid; gap: 1.5rem; }
+.card-actions { position: absolute; top: .75rem; right: .75rem; display: flex; gap: 0.5rem; z-index: 5; }
+.card-action-btn { background: none; border: none; color: rgba(255,255,255,0.7); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s ease; padding: 0.5rem; }
+.card-action-btn svg { width: 20px; height: 20px; stroke: currentColor; stroke-width: 2.5; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.5)); }
+.card-action-btn.edit-btn:hover { color: var(--accent-primary); transform: scale(1.1); }
+.card-action-btn.delete-btn:hover { color: var(--accent-danger); transform: scale(1.1); }
+.card img { width: 100%; object-fit: cover; border-radius: 8px 8px 0 0; background-color: #333; }
+.card-content { padding: 1.5rem; background: linear-gradient(to bottom, var(--card-bg, var(--bg-glass)), var(--bg-glass)); flex: 1; display: flex; flex-direction: column; }
+.card-content h3 { margin: 0 0 0.5rem 0; font-size: 1.4rem; border-bottom: 1px solid var(--border-color); padding-bottom: 0.5rem; }
+.recipe-grid { grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); }
+.ingredient-grid { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.recipe-card img { height: 220px; }
+.ingredient-card img { height: 350px; }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(70px, 1fr)); gap: 1rem; margin-top: auto; padding-top: 1rem; }
+.stat-item { text-align: left; }
+.stat-value { font-size: 1.2rem; font-weight: 700; line-height: 1.1; }
+.stat-value span { font-size: 0.9rem; font-weight: 500; color: var(--text-secondary); margin-left: 3px; }
+.stat-label { font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase; display: flex; align-items: center; gap: 4px; margin-top: 2px; }
+.stat-label svg { width: 12px; height: 12px; stroke-width: 2.5; }
+.stat-item.calories .stat-value, .stat-item.calories .stat-label svg { color: var(--text-accent-calories); stroke: var(--text-accent-calories); }
+.stat-item.protein .stat-value, .stat-item.protein .stat-label svg { color: var(--text-accent-protein); stroke: var(--text-accent-protein); }
+.stat-item.carbs .stat-value, .stat-item.carbs .stat-label svg { color: var(--text-accent-carbs); stroke: var(--text-accent-carbs); }
+.stat-item.fat .stat-value, .stat-item.fat .stat-label svg { color: var(--text-accent-fat); stroke: var(--text-accent-fat); }
+.stat-item.cost .stat-value, .stat-item.cost .stat-label svg { color: var(--accent-primary); stroke: var(--accent-primary); }
+.planner-date-header { margin-bottom: 1.5rem; background-color: var(--bg-secondary); padding: 1rem; border-radius: 12px; }
+.date-scroller-container { overflow-x: auto; white-space: nowrap; padding-bottom: 10px; margin-bottom: 10px; -ms-overflow-style: none; scrollbar-width: none; }
+.date-scroller-container::-webkit-scrollbar { display: none; }
+.date-scroller { display: flex; gap: 1rem; }
+.date-item { cursor: pointer; text-align: center; padding: 0.5rem; border-radius: 8px; min-width: 50px; }
+.date-day { font-size: 0.8rem; font-weight: 500; color: var(--text-secondary); }
+.date-number { display: block; font-size: 1.2rem; font-weight: 700; margin-top: 0.25rem; }
+.date-item.active .date-number { background-color: var(--accent-primary); color: var(--bg-secondary); border-radius: 50%; width: 32px; height: 32px; line-height: 32px; margin: 0.25rem auto 0; }
+.planner-today-link { text-align: center; margin-top: 0.5rem; }
+.planner-today-link a { color: var(--text-accent-carbs); text-decoration: none; font-size: 0.9rem; }
+#daily-totals { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 2rem; }
+.total-card { flex: 1; background: var(--bg-secondary); padding: 1rem; border-radius: 8px; text-align: center; min-width: 120px; }
+.meal-section { background-color: var(--bg-secondary); padding: 1.5rem; border-radius: 12px; }
+.meal-item { display: flex; align-items: center; gap: 1rem; background: rgba(255,255,255,0.05); padding: 0.75rem; border-radius: 8px; }
+.meal-item img { width: 60px; height: 60px; object-fit: cover; border-radius: 6px; }
+#modal-container { position: fixed; inset: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); display: flex; align-items: center; justify-content: center; z-index: 1001; }
+#modal-container.hidden { display: none; }
+#modal-content { background: var(--bg-secondary); padding: 2.5rem; border-radius: 16px; width: 90%; max-width: 800px; position: relative; border: 1px solid var(--border-color); max-height: 90vh; display: flex; flex-direction: column; box-shadow: var(--shadow); }
+#modal-body { overflow-y: auto; }
+#modal-close-btn { position: absolute; top: 1rem; right: 1rem; background: none; border: none; font-size: 1.5rem; cursor: pointer; color: var(--text-secondary); }
+.input-group { margin-bottom: 1.25rem; }
+.input-group label { display: block; margin-bottom: 0.5rem; font-weight: 500; color: var(--text-secondary); font-size: 0.9rem; }
+.input-group input, .input-group textarea, .input-group select { width: 100%; padding: 0.8rem 1rem; border: 1px solid var(--border-color); border-radius: 8px; box-sizing: border-box; background-color: var(--bg-glass); color: var(--text-primary); font-size: 1rem; backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); }
+.input-group input[type="file"] { padding: 0.5rem; }
+.button { background-color: var(--accent-primary); color: var(--text-primary) !important; border: none; padding: 0.8rem 1.75rem; border-radius: 25px; font-weight: 700; cursor: pointer; transition: transform 0.2s; text-decoration: none; display: inline-block; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem 2rem; }
+#recipe-ingredients-list-modal { margin-top: 1rem; display: flex; flex-direction: column; gap: 0.5rem; }
+#recipe-ingredients-list-modal > div { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0.75rem; background-color: rgba(0,0,0,0.2); border-radius: 6px; }
+.remove-ing-btn { background: none; border: none; color: #ff4d4d; cursor: pointer; font-size: 1.2rem; }
+EOF
+
+# --- app.js ---
+cat <<'EOF' > "$PROJECT_DIR/app/public/app.js"
+document.addEventListener('DOMContentLoaded', () => {
+    const app = {
+        state: { ingredients: [], recipes: [], plannerDate: new Date().toISOString().split('T')[0], mealPlan: [], currentView: 'recipes' },
+        elements: {},
+        colorThief: new ColorThief(),
+        api: { async get(url) { return (await fetch(url)).json(); }, async send(url, method, body) { const isFormData = body instanceof FormData; const headers = isFormData ? {} : { 'Content-Type': 'application/json' }; const res = await fetch(url, { method, headers, body: isFormData ? body : JSON.stringify(body) }); if (!res.ok) { const err = await res.json(); alert(`Error: ${err.error}`); throw new Error(err.error); } return res.json(); }, },
+        init() {
+            this.elements = {
+                viewTitle: document.getElementById('view-title'), main: document.getElementById('app-main'), nav: document.getElementById('app-nav'), modalContainer: document.getElementById('modal-container'), modalBody: document.getElementById('modal-body'), modalCloseBtn: document.getElementById('modal-close-btn'), centralAddBtn: document.getElementById('central-add-btn'),
+            };
+            this.elements.nav.addEventListener('click', e => { const navBtn = e.target.closest('.nav-btn'); if (navBtn) this.navigateTo(navBtn.dataset.view); });
+            this.elements.centralAddBtn.addEventListener('click', () => { if (this.state.currentView === 'recipes') this.showAddEditRecipeModal(); if (this.state.currentView === 'ingredients') this.showAddEditIngredientModal(); });
+            this.elements.modalCloseBtn.addEventListener('click', () => this.closeModal());
+            this.elements.modalContainer.addEventListener('click', e => { if (e.target === this.elements.modalContainer) this.closeModal() });
+            this.navigateTo('recipes');
+        },
+        async navigateTo(view) { this.state.currentView = view; await this.fetchData(); this.render(); },
+        async fetchData() { [this.state.ingredients, this.state.recipes] = await Promise.all([this.api.get('/api/ingredients'), this.api.get('/api/recipes')]); if (this.state.currentView === 'planner') await this.fetchMealPlan(); },
+        async fetchMealPlan() { this.state.mealPlan = await this.api.get(`/api/meal-planner/${this.state.plannerDate}`); },
+        render() {
+            const view = this.state.currentView;
+            this.elements.nav.querySelectorAll('.nav-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.view === view));
+            this.elements.viewTitle.textContent = view.charAt(0).toUpperCase() + view.slice(1);
+            this.elements.centralAddBtn.style.display = (view === 'planner') ? 'none' : 'flex';
+            const renderMethod = `render${view.charAt(0).toUpperCase() + view.slice(1)}View`;
+            if (this[renderMethod]) this[renderMethod]();
+        },
+        renderRecipesView() { this.elements.main.innerHTML = `<div class="grid-container recipe-grid">${this.state.recipes.map((r, i) => this.getRecipeCardHTML(r, `card-${i}`)).join('')}</div>`; this.addCardEventListeners(); this.state.recipes.forEach((r, i) => this.updateCardTheme(r.image_url, document.getElementById(`card-${i}`))); },
+        renderIngredientsView() { this.elements.main.innerHTML = `<div class="grid-container ingredient-grid">${this.state.ingredients.map((ing, i) => this.getIngredientCardHTML(ing, `card-${i}`)).join('')}</div>`; this.addCardEventListeners(); this.state.ingredients.forEach((ing, i) => this.updateCardTheme(ing.image_url, document.getElementById(`card-${i}`))); },
+        getRecipeCardHTML(recipe, cardId) { const totals = this.calculateRecipeTotals(recipe.ingredients); return `<div class="card recipe-card" id="${cardId}" data-id="${recipe.id}"><div class="card-actions"><button class="card-action-btn edit-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></button><button class="card-action-btn delete-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg></button></div><img src="${recipe.image_url || 'placeholder.png'}" alt="${recipe.name}"><div class="card-content"><h3>${recipe.name}</h3><div class="stats-grid"><div class="stat-item calories"><div class="stat-value">${totals.calories.toFixed(0)}</div><div class="stat-label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10zM9 12l2-3 2 3h-4z"></path></svg>KCAL</div></div><div class="stat-item protein"><div class="stat-value">${totals.protein.toFixed(1)}<span>g</span></div><div class="stat-label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M20.42 4.58a5.4 5.4 0 0 0-7.64 0l-1.78 1.78-1.78-1.78a5.4 5.4 0 0 0-7.64 0 5.4 5.4 0 0 0 0 7.64l1.78 1.78 7.64 7.64 7.64-7.64 1.78-1.78a5.4 5.4 0 0 0 0-7.64z"></path></svg>Protein</div></div><div class="stat-item carbs"><div class="stat-value">${totals.carbs.toFixed(1)}<span>g</span></div><div class="stat-label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path></svg>Carbs</div></div><div class="stat-item fat"><div class="stat-value">${totals.fat.toFixed(1)}<span>g</span></div><div class="stat-label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M21.21 15.89A10 10 0 1 1 8.11 2.79"></path><path d="M22 12A10 10 0 0 0 12 2v10z"></path></svg>Fat</div></div><div class="stat-item cost"><div class="stat-value">₹${totals.cost.toFixed(2)}</div><div class="stat-label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>Total Cost</div></div></div></div></div>`; },
+        getIngredientCardHTML(ing, cardId) { return `<div class="card ingredient-card" id="${cardId}" data-id="${ing.id}"><div class="card-actions"><button class="card-action-btn edit-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></button><button class="card-action-btn delete-btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg></button></div><img src="${ing.image_url || 'placeholder.png'}" alt="${ing.name}"><div class="card-content"><h3>${ing.name}</h3><div class="stats-grid"><div class="stat-item calories"><div class="stat-value">${(ing.calories || 0).toFixed(0)}</div><div class="stat-label"><svg viewBox="0 0 24 24"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10zM9 12l2-3 2 3h-4z"></path></svg>KCAL</div></div><div class="stat-item protein"><div class="stat-value">${(ing.protein || 0).toFixed(1)}<span>g</span></div><div class="stat-label"><svg viewBox="0 0 24 24"><path d="M20.42 4.58a5.4 5.4 0 0 0-7.64 0l-1.78 1.78-1.78-1.78a5.4 5.4 0 0 0-7.64 0 5.4 5.4 0 0 0 0 7.64l1.78 1.78 7.64 7.64 7.64-7.64 1.78-1.78a5.4 5.4 0 0 0 0-7.64z"></path></svg>Protein</div></div><div class="stat-item carbs"><div class="stat-value">${(ing.carbs || 0).toFixed(1)}<span>g</span></div><div class="stat-label"><svg viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path></svg>Carbs</div></div><div class="stat-item fat"><div class="stat-value">${(ing.fat || 0).toFixed(1)}<span>g</span></div><div class="stat-label"><svg viewBox="0 0 24 24"><path d="M21.21 15.89A10 10 0 1 1 8.11 2.79"></path><path d="M22 12A10 10 0 0 0 12 2v10z"></path></svg>Fat</div></div><div class="stat-item cost"><div class="stat-value">₹${(ing.price || 0).toFixed(2)}</div><div class="stat-label"><svg viewBox="0 0 24 24"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>/ 100g</div></div></div></div></div>`; },
+        showAddEditIngredientModal(ing = {}) { const isEdit = !!ing.id; this.showModal(`<h2>${isEdit ? 'Edit' : 'Add'} Ingredient</h2><form id="ingredient-form" enctype="multipart/form-data"><div class="form-grid"><div class="input-group"><label>Name</label><input type="text" name="name" value="${ing.name || ''}" required></div><div class="input-group"><label>Category</label><input type="text" name="category" value="${ing.category || ''}"></div></div><div class="input-group"><label>${isEdit ? 'Replace' : 'Add'} Image</label><input type="file" name="image" accept="image/*"></div><div class="form-grid"><div class="input-group"><label>Calories (/100g)</label><input type="number" name="calories" step="0.1" value="${ing.calories || 0}" required></div><div class="input-group"><label>Protein (g)</label><input type="number" name="protein" step="0.1" value="${ing.protein || 0}" required></div><div class="input-group"><label>Carbs (g)</label><input type="number" name="carbs" step="0.1" value="${ing.carbs || 0}" required></div><div class="input-group"><label>Fat (g)</label><input type="number" name="fat" step="0.1" value="${ing.fat || 0}" required></div></div><div class="input-group"><label>Price (₹)</label><input type="number" name="price" step="0.01" value="${ing.price || 0}" required></div><button type="submit" class="button">Save</button></form>`); document.getElementById('ingredient-form').addEventListener('submit', async e => { e.preventDefault(); const url = isEdit ? `/api/ingredients/${ing.id}` : '/api/ingredients'; await this.api.send(url, isEdit ? 'PUT' : 'POST', new FormData(e.target)); this.closeModal(); this.navigateTo('ingredients'); }); },
+        showAddEditRecipeModal(recipe = {}) { const isEdit = !!recipe.id; let recipeIngredients = recipe.ingredients ? JSON.parse(JSON.stringify(recipe.ingredients)) : []; const updateIngredientList = () => { document.getElementById('recipe-ingredients-list-modal').innerHTML = recipeIngredients.map((item, index) => { const ingData = this.state.ingredients.find(i => i.id === item.id); return `<div><span>${ingData?.name || 'Unknown'} - ${item.quantity || item.quantity_grams}g</span><button type="button" class="remove-ing-btn" data-index="${index}">&times;</button></div>`; }).join(''); document.querySelectorAll('.remove-ing-btn').forEach(btn => btn.addEventListener('click', e => { recipeIngredients.splice(e.target.dataset.index, 1); updateIngredientList(); })); }; this.showModal(`<h2>${isEdit ? 'Edit' : 'Add'} Recipe</h2><form id="recipe-form" class="form-grid"><div><div class="input-group"><label>Name</label><input type="text" name="name" value="${recipe.name || ''}" required></div><div class="input-group"><label>Instructions</label><textarea name="instructions" rows="8">${recipe.instructions || ''}</textarea></div><div class="input-group"><label>${isEdit ? 'Replace' : 'Add'} Image</label><input type="file" name="image" accept="image/*"></div><button type="submit" class="button">Save Recipe</button></div><div><h3>Ingredients</h3><div class="input-group" style="display: flex; gap: 0.5rem; align-items: flex-end;"><div style="flex-grow: 1;"><label>Add Ingredient</label><select id="ingredient-select-modal"><option value="">-- Select --</option>${this.state.ingredients.map(i => `<option value="${i.id}">${i.name}</option>`).join('')}</select></div><div style="width: 80px;"><input id="ingredient-qty-modal" type="number" placeholder="Grams"></div><button type="button" id="add-ing-to-recipe-btn" class="button">Add</button></div><div id="recipe-ingredients-list-modal"></div></div></form>`); updateIngredientList(); document.getElementById('add-ing-to-recipe-btn').addEventListener('click', () => { const id = parseInt(document.getElementById('ingredient-select-modal').value); const quantity = parseFloat(document.getElementById('ingredient-qty-modal').value); if (id && quantity > 0 && !recipeIngredients.some(i => i.id === id)) { recipeIngredients.push({ id, quantity }); updateIngredientList(); } }); document.getElementById('recipe-form').addEventListener('submit', async e => { e.preventDefault(); const formData = new FormData(); if (e.target.image.files[0]) formData.append('image', e.target.image.files[0]); formData.append('recipeData', JSON.stringify({ name: e.target.name.value, instructions: e.target.instructions.value, ingredients: recipeIngredients })); await this.api.send(isEdit ? `/api/recipes/${recipe.id}` : '/api/recipes', isEdit ? 'PUT' : 'POST', formData); this.closeModal(); this.navigateTo('recipes'); }); },
+        addCardEventListeners() { this.elements.main.querySelectorAll('.edit-btn').forEach(btn => btn.addEventListener('click', e => { e.stopPropagation(); const id = e.target.closest('.card').dataset.id; if (this.state.currentView === 'recipes') this.showAddEditRecipeModal(this.state.recipes.find(r => r.id == id)); else this.showAddEditIngredientModal(this.state.ingredients.find(i => i.id == id)); })); this.elements.main.querySelectorAll('.delete-btn').forEach(btn => btn.addEventListener('click', async e => { e.stopPropagation(); if (!confirm('Are you sure you want to delete this item?')) return; const id = e.target.closest('.card').dataset.id; await this.api.send(`/api/${this.state.currentView}/${id}`, 'DELETE'); this.navigateTo(this.state.currentView); })); },
+        showModal(content) { this.elements.modalBody.innerHTML = content; this.elements.modalContainer.classList.remove('hidden'); },
+        closeModal() { this.elements.modalContainer.classList.add('hidden'); },
+        renderPlannerView() { this.elements.main.innerHTML = `<div class="planner-date-header"><div class="date-scroller-container"><div class="date-scroller"></div></div><div class="planner-today-link"><a href="#" id="today-btn">Go to Today</a></div></div><div id="daily-totals"></div><div class="planner-grid">${['Breakfast', 'Lunch', 'Dinner', 'Snacks'].map(meal => `<div class="meal-section"><div class="meal-header"><h2>${meal}</h2><button class="button add-meal-item-btn" data-meal="${meal}">+ Add</button></div><div id="meal-${meal.toLowerCase()}" class="meal-items"></div></div>`).join('')}</div>`; this.renderDateScroller(); this.renderPlannerItemsAndTotals(); document.getElementById('today-btn').addEventListener('click', (e) => { e.preventDefault(); this.changePlannerDate(null, true); }); document.querySelectorAll('.add-meal-item-btn').forEach(btn => btn.addEventListener('click', () => this.showAddItemToMealModal(btn.dataset.meal))); document.querySelector('.date-scroller').addEventListener('click', e => { const dateItem = e.target.closest('.date-item'); if (dateItem) this.changePlannerDate(dateItem.dataset.date); }); },
+        renderDateScroller() { const scroller = document.querySelector('.date-scroller'); let content = ''; const selected = new Date(this.state.plannerDate + 'T12:00:00'); for (let i = -7; i <= 14; i++) { const date = new Date(selected); date.setDate(date.getDate() + i); const dateString = date.toISOString().split('T')[0]; const day = date.toLocaleDateString(undefined, { weekday: 'short' }); const number = date.getDate(); const isActive = dateString === this.state.plannerDate; content += `<div class="date-item ${isActive ? 'active' : ''}" data-date="${dateString}"><div class="date-day">${day}</div><div class="date-number">${number}</div></div>`; } scroller.innerHTML = content; const activeEl = scroller.querySelector('.active'); if (activeEl) activeEl.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' }); },
+        async changePlannerDate(newDate, goToday = false) { if (goToday) { this.state.plannerDate = new Date().toISOString().split('T')[0]; } else if (newDate) { this.state.plannerDate = newDate; } await this.fetchMealPlan(); this.renderPlannerView(); },
+        async renderPlannerItemsAndTotals() { const dailyTotals = { calories: 0, protein: 0, carbs: 0, fat: 0, cost: 0 }; const mealElements = { breakfast: '', lunch: '', dinner: '', snacks: '' }; for (const item of this.state.mealPlan) { let itemTotals, itemName, itemImage; if (item.recipe_id) { const recipe = this.state.recipes.find(r => r.id === item.recipe_id); if (!recipe) continue; itemTotals = this.calculateRecipeTotals(recipe.ingredients); itemName = item.recipe_name; itemImage = item.recipe_image; } else if (item.ingredient_id) { itemTotals = this.calculateRecipeTotals([{ ...item, id: item.ingredient_id, quantity: item.quantity_grams }]); itemName = `${item.ingredient_name} (${item.quantity_grams}g)`; itemImage = item.ingredient_image; } else { continue; } Object.keys(dailyTotals).forEach(key => dailyTotals[key] += itemTotals[key] || 0); const mealKey = item.meal_type.toLowerCase(); if (mealElements[mealKey] !== undefined) { mealElements[mealKey] += `<div class="meal-item" data-id="${item.id}"><img src="${itemImage || '/default-recipe.png'}" alt="${itemName}"><div class="meal-item-details"><div class="meal-item-name">${itemName}</div><div class="meal-item-macros">C: ${itemTotals.calories.toFixed(0)} | P: ${itemTotals.protein.toFixed(1)}g | C: ${itemTotals.carbs.toFixed(1)}g | F: ${itemTotals.fat.toFixed(1)}g | Cost: ₹${itemTotals.cost.toFixed(2)}</div></div><button class="remove-btn" data-id="${item.id}">&times;</button></div>`; } } document.getElementById('daily-totals').innerHTML = `<div class="total-card"><div class="value">${dailyTotals.calories.toFixed(0)}</div><div class="label">Calories</div></div><div class="total-card"><div class="value">${dailyTotals.protein.toFixed(1)}g</div><div class="label">Protein</div></div><div class="total-card"><div class="value">${dailyTotals.carbs.toFixed(1)}g</div><div class="label">Carbs</div></div><div class="total-card"><div class="value">${dailyTotals.fat.toFixed(1)}g</div><div class="label">Fat</div></div><div class="total-card"><div class="value cost">₹${dailyTotals.cost.toFixed(2)}</div><div class="label">Total Cost</div></div>`; Object.keys(mealElements).forEach(key => { const el = document.getElementById(`meal-${key}`); if (el) el.innerHTML = mealElements[key] || `<p style="color:var(--text-secondary); font-size:0.9rem;">No items added.</p>`; }); document.querySelectorAll('.remove-btn').forEach(btn => btn.addEventListener('click', async e => { e.stopPropagation(); await this.api.send(`/api/meal-planner/${e.target.dataset.id}`, 'DELETE'); await this.fetchMealPlan(); this.renderPlannerItemsAndTotals(); })); },
+        showAddItemToMealModal(meal_type) { this.showModal(`<h2>Add to ${meal_type}</h2><div class="input-group"><label>Select Item</label><select id="meal-item-select"><option value="">-- Select --</option><optgroup label="Recipes">${this.state.recipes.map(r => `<option value="recipe-${r.id}">${r.name}</option>`).join('')}</optgroup><optgroup label="Ingredients">${this.state.ingredients.map(i => `<option value="ingredient-${i.id}">${i.name}</option>`).join('')}</optgroup></select></div><div class="input-group" id="meal-item-qty-group" style="display:none;"><label>Quantity (g)</label><input id="meal-item-qty" type="number"></div><button id="add-item-to-meal-confirm" class="button">Add Item</button>`); const selectEl = document.getElementById('meal-item-select'), qtyGroup = document.getElementById('meal-item-qty-group'); selectEl.addEventListener('change', () => qtyGroup.style.display = selectEl.value.startsWith('ingredient-') ? 'block' : 'none'); document.getElementById('add-item-to-meal-confirm').addEventListener('click', async () => { const [item_type, item_id] = selectEl.value.split('-'); if (!item_type) return; const quantity = item_type === 'ingredient' ? parseFloat(document.getElementById('meal-item-qty').value) : null; if (item_type === 'ingredient' && !(quantity > 0)) { alert("Please enter a valid quantity."); return; } await this.api.send('/api/meal-planner', 'POST', { date: this.state.plannerDate, meal_type, item_type, item_id, quantity }); this.closeModal(); await this.fetchMealPlan(); this.renderPlannerView(); }); },
+        calculateRecipeTotals(ingredients) { return (ingredients || []).reduce((totals, item) => { const ingData = this.state.ingredients.find(i => i.id === (item.id || item.ingredient_id)); if (!ingData) return totals; const ratio = (item.quantity_grams || item.quantity) / (ingData.per_unit || 100); totals.calories += (ingData.calories || 0) * ratio; totals.protein += (ingData.protein || 0) * ratio; totals.carbs += (ingData.carbs || 0) * ratio; totals.fat += (ingData.fat || 0) * ratio; totals.cost += (ingData.price || 0) * ratio; return totals; }, { calories: 0, protein: 0, carbs: 0, fat: 0, cost: 0 }); },
+        updateCardTheme(imageUrl, cardElement) { if (!imageUrl || !cardElement) return; const img = new Image(); img.crossOrigin = "Anonymous"; img.src = imageUrl; img.onload = () => { const [r, g, b] = this.colorThief.getColor(img); cardElement.querySelector('.card-content').style.setProperty('--card-bg', `rgba(${r}, ${g}, ${b}, 0.3)`); }; },
+    };
+    app.init();
+});
+EOF
+
+# --- 13. LAUNCH THE APPLICATION ---
+echo "--- Upgrade files created. Navigating to the new project directory... ---"
+cd "$PROJECT_DIR"
+echo "--- Building and starting your Upgraded Meal App (${PROJECT_VERSION}) on port ${HOST_PORT}... ---"
+docker-compose up -d --build
+
+# --- 14. PROVIDE ACCESS INFORMATION ---
+echo ""
+echo "--------------------------------------------------------"
+SERVER_IP=$(hostname -I | awk '{print $1}')
+echo "SUCCESS! Your Meal App has been upgraded to ${PROJECT_VERSION}."
+echo "The Planner UI is fixed and card buttons have been redesigned."
+echo "The app is now running on the new port ${HOST_PORT}."
+echo "Access the app at: http://${SERVER_IP}:${HOST_PORT} or http://localhost:${HOST_PORT}"
+echo "--------------------------------------------------------"
